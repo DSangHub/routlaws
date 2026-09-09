@@ -1,11 +1,6 @@
-import { env } from "cloudflare:workers";
-import { getDb } from "@/db";
-import { submissions } from "@/db/schema";
-
 const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 export async function POST(request: Request) {
-  let objectKey = "";
   try {
     const data = await request.formData();
     const name = String(data.get("name") || "").trim().slice(0, 100);
@@ -19,14 +14,23 @@ export async function POST(request: Request) {
       return Response.json({ error: "Choose a JPG, PNG, or WebP vehicle photo." }, { status: 400 });
     if (photo.size > 8 * 1024 * 1024)
       return Response.json({ error: "The photo must be 8 MB or smaller." }, { status: 413 });
-    if (!env.BUCKET) throw new Error("Upload storage is unavailable");
-    const ext = photo.type === "image/png" ? "png" : photo.type === "image/webp" ? "webp" : "jpg";
-    objectKey = `submissions/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}.${ext}`;
-    await env.BUCKET.put(objectKey, photo.stream(), { httpMetadata: { contentType: photo.type }, customMetadata: { status: "pending" } });
-    await getDb().insert(submissions).values({ name, email, vehicle, story, objectKey, originalFilename: photo.name.slice(0, 255), contentType: photo.type, status: "pending", consent: true });
+    const webhook = process.env.ROUTLAWS_FORM_WEBHOOK_URL;
+    if (!webhook) {
+      console.error("photo submission failed", { reason: "ROUTLAWS_FORM_WEBHOOK_URL is not configured" });
+      return Response.json({ error: "Photo submissions are being connected. Please try again soon." }, { status: 503 });
+    }
+    const forwarded = new FormData();
+    forwarded.set("type", "member-photo");
+    forwarded.set("name", name);
+    forwarded.set("email", email);
+    forwarded.set("vehicle", vehicle);
+    forwarded.set("story", story);
+    forwarded.set("consent", "yes");
+    forwarded.set("photo", photo, photo.name.slice(0, 255));
+    const response = await fetch(webhook, { method: "POST", body: forwarded });
+    if (!response.ok) throw new Error(`Photo webhook returned ${response.status}`);
     return Response.json({ submitted: true }, { status: 201 });
   } catch (error) {
-    if (objectKey && env.BUCKET) await env.BUCKET.delete(objectKey).catch(() => undefined);
     console.error("photo submission failed", error);
     return Response.json({ error: "Photo submission is temporarily unavailable. Your information was not published." }, { status: 500 });
   }
